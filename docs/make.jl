@@ -48,7 +48,7 @@ append!(reference_list, lit_reference_list)
 makedocs(;
     modules=[KomaMRI, KomaMRIBase, KomaMRICore, KomaMRIFiles, KomaMRIPlots],
     sitename="KomaMRI.jl",
-    authors="Carlos Castillo Passi and Boris Orostica Navarrete",
+    authors="Carlos Castillo Passi and collaborators",
     checkdocs=:exports,
     pages=[
         "🏠 Home" => "index.md",
@@ -63,7 +63,7 @@ makedocs(;
         prettyurls=true,
         sidebar_sitename=false,
         collapselevel=1,
-        assets=["assets/hide-documenter-example-output.css"],
+        assets=["assets/hide-documenter-example-output.css","assets/center-images.css"],
     ),
     clean=false,
 )
