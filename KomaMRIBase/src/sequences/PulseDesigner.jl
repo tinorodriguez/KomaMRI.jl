@@ -145,6 +145,7 @@ julia> plot_seq(seq)
 julia> plot_kspace(seq)
 ```
 """
+
 function EPI(FOV::Real, N::Integer, sys::Scanner)
     #TODO: consider when N is even
 	Δt = sys.ADC_Δt
@@ -180,6 +181,50 @@ function EPI(FOV::Real, N::Integer, sys::Scanner)
 	#Saving parameters
 	seq.DEF = Dict("Nx"=>Nx,"Ny"=>Ny,"Nz"=>1,"Name"=>"epi")
 	return seq
+end
+
+function EPI_Tino(FOV::Real,Nx::Integer,Ny::Integer,TE::Real,preDelay::Real,preblip::Bool,sys::Scanner)
+	# ζ = 2*sys.Gmax/3/sys.Smax
+	#Tmax -= 2*(N-2)ζ
+	Tmax = TE
+	Tesp = Tmax/(Ny+3) 
+	@show Ga = (-γ*FOV*Tesp + sqrt((γ*FOV*Tesp)^2 - 8*γ*FOV*Nx/sys.Smax))/(-4*γ*FOV/sys.Smax)
+	Ga < 2*sys.Gmax/3 ? Ga = 2*sys.Gmax/3 : nothing
+	ζ = Ga/sys.Smax
+	@show Ta = Nx/(γ*FOV*Ga)
+	# @show Ta = Tesp - 2*ζ
+	Δτ = Ta/(Ny-1);
+	ϵ1 = Δτ/(Δτ + ζ)
+
+	# GR = zeros(Grad, 3, length(0:2*N-2))
+	# GR.x .= [mod(i,2)==0 ? Grad(Ga*(-1)^(i/2),Ta,ζ) : Grad(0.,Δτ,ζ) for i=0:2*N-2]
+	# GR.y .= [mod(i,2)==1 ? ϵ1*Grad(Ga,Δτ,ζ) :         Grad(0.,Ta,ζ) for i=0:2*N-2]
+	# EPI = Sequence(GR)
+	# EPI.ADC = [mod(i,2)==1 ? ADC(0,Δτ,ζ) : ADC(N,Ta,ζ) for i=0:2*N-2]
+
+	GRx = [Grad(Ga,Ta,ζ);Grad(0.,0);Grad(0.,0);;]
+	GRy = [Grad(0.,0);Grad(Ga,Δτ,ζ);Grad(0.,0);;]
+	GRy = ϵ1*GRy
+	seqx = Sequence(GRx,[RF(0.,0);;],[ADC(Nx,Ta,ζ)],[Ta+ζ])
+	seqy = Sequence(GRy,[RF(0.,0);;],[ADC(0,0)],[Δτ+ζ])
+	seqx_end = Sequence(GRx,[RF(0.,0);;],[ADC(Nx,Ta,ζ)],[Ta+2ζ])
+	EPI = Sequence()
+	for i = 0:Ny-2
+		EPI+=(-1)^i*seqx+seqy
+	end
+	EPI += (-1)^(Ny-1)*seqx_end
+	ϵ2 = Ta/(Ta+ζ)
+    PHASE =   Sequence(1/2*[Grad(      -Ga, Ta, ζ); ϵ2*Grad(-Ga, Ta, ζ); Grad(0.,0.);;]) #This needs to be calculated differently
+	DEPHASE = Sequence(1/2*[Grad((-1)^Ny*Ga, Ta, ζ); ϵ2*Grad(-Ga, Ta, ζ); Grad(0.,0.);;]) #for even N
+	BLIP = Sequence(1/2*[Grad(0.,0.);ϵ1*Grad(Ga,Δτ,ζ);Grad(0.,0.);;])
+	seq = PHASE+EPI+DEPHASE
+	if preblip
+		seq = BLIP+seq
+	end
+	#Saving parameters
+	seq.DEF = Dict("Nx"=>Nx,"Ny"=>Ny,"Nz"=>1,"Name"=>"epi")
+	delay = Delay(TE - dur(seq)/2 - preDelay)
+	return  delay + seq	
 end
 
 """
@@ -365,6 +410,7 @@ function EPI_dur(duration::Real,FOV::Real,sys::Scanner)
     end
 end
 function EPI_pablo(FOV::Real, N::Integer, sys::Scanner; Δt=sys.ADC_Δt)
+	@show Δt
 	Gmax = sys.Gmax
 	Nx = Ny = N #Square acquisition
 	Δx = FOV/(Nx-1)
@@ -379,8 +425,8 @@ function EPI_pablo(FOV::Real, N::Integer, sys::Scanner; Δt=sys.ADC_Δt)
 	ϵ1 = Δτ/(Δτ+ζ)
 	#EPI base
 	epi = Sequence(vcat(
-	    [mod(i,2)==0 ? Grad(Ga*(-1)^(i/2),Ta,ζ) : Grad(0.,Δτ,ζ) for i=0:2*Ny-2],  #Gx
-	 	[mod(i,2)==1 ? ϵ1*Grad(Ga,Δτ,ζ) :         Grad(0.,Ta,ζ) for i=0:2*Ny-2])) #Gy
+	    [mod(i,2)==0 ? Grad(Ga*(-1)^(i/2),Ta,ζ) : Grad(0.,Δτ,ϵ1*ζ) for i=0:2*Ny-2],  #Gx
+	 	[mod(i,2)==1 ? Grad(ϵ1*Ga,Δτ,ϵ1*ζ) :         Grad(0.,Ta,ζ) for i=0:2*Ny-2])) #Gy
 	epi.ADC = [mod(i,2)==1 ? ADC(0,Δτ,ζ) : ADC(N,Ta,ζ) for i=0:2*Ny-2]
 	# Relevant parameters
 	Δfx_pix = 1/Ta
@@ -399,7 +445,8 @@ function EPI_dif(duration::Real,FOV::Real,sys::Scanner)
 	#Δt = sys.ADC_Δt
 	#FOV_min = 1/(γ*Δt*sys.Gmax)
 	#@assert FOV ≥ FOV_min "FOV should be at least bigger than $(FOV_min)"
-	epi = PulseDesigner.EPI_pablo(FOV,128,sys)
+	epi = PulseDesigner.EPI_pablo(FOV,63,sys;Δt = 5e-6)
+	@show duration - dur(epi)
 	d = Delay(duration - dur(epi))
 	seq = d+epi
 	return seq
@@ -442,14 +489,15 @@ julia> seq = diffusion_SE(b_value, b_vector, δ, Δ, TE)
 julia> plot_seq(seq)
 ```
 """
-function diffusion_SE(b_value::Int, b_vector::Vector, δ::Real, Δ::Real, TE::Real, sys::Scanner; ξ::Real = sys.Gmax/sys.Smax)
+function diffusion_SE(b_value::Real, b_vector::Vector, δ::Real, Δ::Real, TE::Real, sys::Scanner; ξ::Real = sys.Gmax/sys.Smax)
 	@assert size(b_vector,1) == 3 "b_vector must be a 3 element vector"
-	@assert 1 - sqrt(b_vector'*b_vector) < 1e-11 "b_vector must be normalized"
+	@assert 1 - sqrt(b_vector'*b_vector) < 1e-8 "b_vector must be normalized"
 	seq = Sequence()
+	G = Grad(1,δ,ξ,ξ)
+	δ = δ + ξ
 	b_value < 1e6 ? b_value *=  1e6 : nothing
 	b_max = (γ*2*π)^2*sys.Gmax^2*(δ^2*(Δ - δ/3) + ξ^3/3 - δ*ξ^2/6)
 	@assert b_value < b_max "With that parameters the maximum allowed b-value is: $(floor(b_max*1e-6))"
-	G = Grad(1,δ,ξ,ξ)
 	R = hcat(b_vector,zeros(3,2))
 	A = sqrt(b_value/b_max)*sys.Gmax
 	durRF = π/2/(2π*γ*sys.B1); #90-degree hard excitation pulse
@@ -458,9 +506,17 @@ function diffusion_SE(b_value::Int, b_vector::Vector, δ::Real, Δ::Real, TE::Re
 	delay_grad = Delay((Δ-dur(G))/2)
 	@assert TE/2 > durRF/2 + dur(G)+(Δ-dur(G))/2 "With that parameters, the minimum allowed TE is: $((durRF/2+dur(G)+Δ/2)*2e3) ms"
 	delay = Delay(TE/2 - durRF - dur(G) - (Δ-dur(G))/2)
-	seq = rf+delay+G+delay_grad+rf_inv+delay_grad+G+delay
-	@show dur(rf+delay+G+delay_grad+rf_inv+delay_grad+G)*1e3
+	d3 = 1.6e-3
+	D = Δ - (dur(G) + durRF + d3)
+	d1 = TE/2 - (dur(G) + durRF + D)
+	d1 = Delay(d1)
+	D = Delay(D)
+	d3 = Delay(d3)	
+	seq = rf+d1+G+D+rf_inv+d3+G
+	# seq = rf+delay+G+delay_grad+rf_inv+delay_grad+G
+	@show dur(seq)*1e3
 	seq = R*A*seq
+	
 	return seq
 end
 
@@ -574,30 +630,57 @@ function diffusion_STEAM(b_value::Int, b_vector::Vector, δ::Real, TM::Real, TE:
 	return seq
 end
 
-function diffusion_SE_EPI(b_value::Int, b_vector::Vector, δ::Real, Δ::Real, TE::Real, FOV::Real, sys::Scanner; ξ::Real = sys.Gmax/sys.Smax)
-	@assert size(b_vector,1) == 3 "b_vector must be a 3 element vector"
-	# @assert 1 - sqrt(b_vector'*b_vector) < 1e-6 "b_vector must be normalized"
-	seq = Sequence()
-	b_value < 1e6 ? b_value *=  1e6 : nothing
-	b_max = (γ*2*π)^2*sys.Gmax^2*(δ^2*(Δ - δ/3) + ξ^3/3 - δ*ξ^2/6)
-	@assert b_value < b_max "With that parameters the maximum allowed b-value is: $(floor(b_max*1e-6))"
-	G = Grad(1,δ,ξ,ξ)
-	R = hcat(b_vector,zeros(3,2))
-	A = sqrt(b_value/b_max)*sys.Gmax
-	durRF = π/2/(2π*γ*sys.B1); #90-degree hard excitation pulse
-	rf = PulseDesigner.RF_hard(sys.B1, durRF, sys)
-	rf_inv = (0 + 2.0im)*rf
-	delay_grad = Delay((Δ-dur(G))/2)
-	@assert TE/2 > durRF/2 + dur(G)+(Δ-dur(G))/2 "With that parameters, the minimum allowed TE is: $((durRF/2+dur(G)+Δ/2)*2e3) ms"
-	delay = Delay(TE/2 - durRF - dur(G) - (Δ-dur(G))/2)
-	@show epi , t= EPI_dif(2*delay.T,50e-2,sys),2*delay.T
-	seq = rf+delay+G+delay_grad+rf_inv+delay_grad+G
-	@show dur(rf+delay+G+delay_grad+rf_inv+delay_grad+G)*1e3
-	seq = R*A*seq
-	return seq+EPI_dif(2*delay.T,FOV,sys)
+function diffusion_SE_EPI(b_value::Real, b_vector::Vector, δ::Real, Δ::Real, TE::Real, FOV::Real, sys::Scanner; ξ::Real = sys.Gmax/sys.Smax)
+# 	@assert size(b_vector,1) == 3 "b_vector must be a 3 element vector"
+# 	# @assert 1 - sqrt(b_vector'*b_vector) < 1e-6 "b_vector must be normalized"
+# 	seq = Sequence()
+# 	G = Grad(1,δ,ξ,ξ)
+# 	R = hcat(b_vector,zeros(3,2))
+# 	δ = δ + ξ
+# 	b_max = (γ*2*π)^2*sys.Gmax^2*(δ^2*(Δ - δ/3) + ξ^3/3 - δ*ξ^2/6)
+# 	b_value < 1e6 ? b_value *=  1e6 : nothing
+# 	@assert b_value < b_max "With that parameters the maximum allowed b-value is: $(floor(b_max*1e-6))"
+# 	A = sqrt(b_value/b_max)*sys.Gmax
+# 	durRF = π/2/(2π*γ*sys.B1); #90-degree hard excitation pulse
+# 	rf = PulseDesigner.RF_hard(sys.B1, durRF, sys)
+# 	rf_inv = (0 + 2.0im)*rf
+# 	delay_grad = Delay((Δ-dur(G))/2)
+# 	@assert TE/2 > durRF/2 + dur(G)+(Δ-dur(G))/2 "With that parameters, the minimum allowed TE is: $((durRF/2+dur(G)+Δ/2)*2e3) ms"
+# 	delay = Delay(TE/2 - durRF - dur(G) - (Δ-dur(G))/2)
+# 	@show epi , t= EPI_dif(2*delay.T,50e-2,sys),2*delay.T
+# 	seq = rf+delay+G+delay_grad+rf_inv+delay_grad+G
+# 	@show dur(rf+delay+G+delay_grad+rf_inv+delay_grad+G)*1e3
+# 	seq = R*A*seq
+	seq = diffusion_SE(b_value,b_vector,δ,Δ,TE,sys)
+	return seq+EPI_Tino(FOV,128,63,TE,dur(seq),false,sys)
 end
 
-function diffusion_STEAM_EPI(b_value::Int, b_vector::Vector, δ::Real, TM::Real, TE::Real, FOV::Real, sys::Scanner; ξ::Real = sys.Gmax/sys.Smax)
+function diffusion_SE_EPI_blip(b_value::Real, b_vector::Vector, δ::Real, Δ::Real, TE::Real, FOV::Real, sys::Scanner; ξ::Real = sys.Gmax/sys.Smax)
+# 	@assert size(b_vector,1) == 3 "b_vector must be a 3 element vector"
+# 	# @assert 1 - sqrt(b_vector'*b_vector) < 1e-6 "b_vector must be normalized"
+# 	seq = Sequence()
+# 	G = Grad(1,δ,ξ,ξ)
+# 	R = hcat(b_vector,zeros(3,2))
+# 	δ = δ + ξ
+# 	b_max = (γ*2*π)^2*sys.Gmax^2*(δ^2*(Δ - δ/3) + ξ^3/3 - δ*ξ^2/6)
+# 	b_value < 1e6 ? b_value *=  1e6 : nothing
+# 	@assert b_value < b_max "With that parameters the maximum allowed b-value is: $(floor(b_max*1e-6))"
+# 	A = sqrt(b_value/b_max)*sys.Gmax
+# 	durRF = π/2/(2π*γ*sys.B1); #90-degree hard excitation pulse
+# 	rf = PulseDesigner.RF_hard(sys.B1, durRF, sys)
+# 	rf_inv = (0 + 2.0im)*rf
+# 	delay_grad = Delay((Δ-dur(G))/2)
+# 	@assert TE/2 > durRF/2 + dur(G)+(Δ-dur(G))/2 "With that parameters, the minimum allowed TE is: $((durRF/2+dur(G)+Δ/2)*2e3) ms"
+# 	delay = Delay(TE/2 - durRF - dur(G) - (Δ-dur(G))/2)
+# 	@show epi , t= EPI_dif(2*delay.T,50e-2,sys),2*delay.T
+# 	seq = rf+delay+G+delay_grad+rf_inv+delay_grad+G
+# 	@show dur(rf+delay+G+delay_grad+rf_inv+delay_grad+G)*1e3
+# 	seq = R*A*seq
+	seq = diffusion_SE(b_value,b_vector,δ,Δ,TE,sys)
+	return seq+EPI_Tino(FOV,128,63,TE,dur(seq),true,sys)
+end
+
+function diffusion_STEAM_EPI(b_value::Real, b_vector::Vector, δ::Real, TM::Real, TE::Real, FOV::Real, sys::Scanner; ξ::Real = sys.Gmax/sys.Smax)
 	@assert size(b_vector,1) == 3 "b_vector must be a 3 element vector"
 	@assert 1 - sqrt(b_vector'*b_vector) < 1e-5 "b_vector must be normalized"
 	seq = Sequence()
@@ -614,7 +697,7 @@ function diffusion_STEAM_EPI(b_value::Int, b_vector::Vector, δ::Real, TM::Real,
 	delay = Delay(TE/2 - durRF - dur(G))
 	seq = rf+delay+G+rf+Delay(TM)+rf+G
 	seq = R*A*seq
-	return seq+EPI_dif(2*delay.T,FOV,sys)
+	return seq+EPI_Tino(FOV,128,63,TE,dur(seq),false,sys)
 end
 
 export EPI, radial_base, EPI_example end
